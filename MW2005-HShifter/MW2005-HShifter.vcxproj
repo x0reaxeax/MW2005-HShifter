@@ -81,6 +81,10 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
+    <PostBuildEvent>
+      <Command>copy /Y $(SolutionDir)$(Configuration)\$(ProjectName).dll $(SolutionDir)$(Configuration)\$(ProjectName).asi</Command>
+      <Message>Create ASI copy of target</Message>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <ClCompile>
@@ -97,6 +101,10 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
+    <PostBuildEvent>
+      <Command>copy /Y $(SolutionDir)$(Configuration)\$(ProjectName).dll $(SolutionDir)$(Configuration)\$(ProjectName).asi</Command>
+      <Message>Create ASI copy of target</Message>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
@@ -109,6 +117,10 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
+    <PostBuildEvent>
+      <Command>copy /Y $(SolutionDir)$(Configuration)\$(ProjectName).dll $(SolutionDir)$(Configuration)\$(ProjectName).asi</Command>
+      <Message>Create ASI copy of target</Message>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -125,6 +137,10 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
+    <PostBuildEvent>
+      <Command>copy /Y $(SolutionDir)$(Configuration)\$(ProjectName).dll $(SolutionDir)$(Configuration)\$(ProjectName).asi</Command>
+      <Message>Create ASI copy of target</Message>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="main.c" />

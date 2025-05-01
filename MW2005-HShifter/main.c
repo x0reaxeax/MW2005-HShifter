@@ -1,21 +1,56 @@
+///
+/// MIT License
+/// 
+/// Copyright (c) 2025 x0reaxeax
+/// 
+/// Permission is hereby granted, free of charge, to any person obtaining a copy
+/// of this software and associated documentation files (the "Software"), to deal
+/// in the Software without restriction, including without limitation the rights
+/// to use, copy, modify, merge, publish, distribute, sublicense, and /or sell
+/// copies of the Software, and to permit persons to whom the Software is
+/// furnished to do so, subject to the following conditions :
+/// 
+/// The above copyright notice and this permission notice shall be included in all
+/// copies or substantial portions of the Software.
+/// 
+/// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+/// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+/// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE
+/// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+/// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+/// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+/// SOFTWARE.
+/// 
+/// 
+/// H-Shifter emulation for Need for Speed: Most Wanted (2005)
+/// https://github.com/x0reaxeax/MW2005-HShifter
+
 #include <Windows.h>
+
 #include <stdio.h>
 #include <stdint.h>
+
 #include "MinHook/MinHook.h"
+
+#define MWSHIFTER_VERSION_MAJOR 1
+#define MWSHIFTER_VERSION_MINOR 0
+#define MWSHIFTER_VERSION_PATCH 0
 
 #define STATIC      static
 #define NAKED       __declspec(naked)
 #define NORETURN    __declspec(noreturn)
+#define GLOBAL
+#define MAYBE_UNUSED
 
-#define NFSMW_SHIFTGEAR_FUNCTION_OFFSET 0x2920D0
+#define MW_FUNC_SHIFTGEAR           0x006920D0
+#define MW_FUNC_SUB_404010          0x00404010
+#define MW_OBJ_REGISTRY_CONTAINER   0x0092CD28
 
-HANDLE  g_hShifterThread = NULL;
-DWORD32 g_dwCarObject = 0;
-DWORD32 g_dwOriginalShiftGearFunction = 0;
-PDWORD32 g_lpdwGearAddress = NULL;
-
-FILE *g_fpStdout = NULL;
-FILE *g_fpStderr = NULL;
+#ifdef __cplusplus
+typedef bool (__thiscall *fn_ShiftGear)(PDWORD thisptr, int gear);
+#else
+typedef BOOLEAN (*fn_ShiftGear)(PDWORD thisptr, int gear);
+#endif
 
 typedef UINT(WINAPI* GetRawInputData_t)(
     HRAWINPUT hRawInput, 
@@ -24,68 +59,6 @@ typedef UINT(WINAPI* GetRawInputData_t)(
     PUINT pcbSize, 
     UINT cbSizeHeader
 );
-
-GetRawInputData_t oGetRawInputData = NULL;
-
-STATIC CONST BYTE abyOriginalPrologue[] = {
-    0x56,                                   // push esi
-    0x8B, 0xF1,                             // mov esi, ecx
-    0x8B, 0x8E, 0x60, 0x01, 0x00, 0x00,     // mov ecx, [esi+0x160]
-};
-
-VOID NAKED NORETURN _GearShiftHook(
-    VOID
-) {
-    __asm {
-        MOV [g_dwCarObject], ECX            // save 'this' pointer
-        PUSH ESI
-        MOV ESI, ECX
-        MOV ECX, [ESI + 0x160]
-        JMP [g_dwOriginalShiftGearFunction + 9] // jump to original function]
-    }
-}
-
-VOID NAKED NORETURN _Trampoline(
-    VOID
-) {
-    __asm {
-        JMP[_GearShiftHook]
-        NOP
-        NOP
-        NOP
-    }
-}
-
-SIZE_T GenJump(
-    DWORD32 dwDestAddr,
-    DWORD32 dwSourceAddr,
-    LPBYTE lpOutBuf
-) {
-    DWORD32 dwRelOffset = dwDestAddr - (dwSourceAddr + 2); // assume short jump first
-
-    // short jump
-    if (dwRelOffset >= -128 && dwRelOffset <= 127) {
-        lpOutBuf[0] = 0xEB; // short jump
-        lpOutBuf[1] = (BYTE) (dwRelOffset & 0xFF);
-        return 2;
-    }
-
-    // long jump
-    dwRelOffset = dwDestAddr - (dwSourceAddr + 5);
-
-#ifdef WIN64
-    if (dwRelOffset < INT32_MIN || dwRelOffset > INT32_MAX) {
-        return 0; // out of range
-    }
-#endif
-
-    lpOutBuf[0] = 0xE9; // long jump
-    lpOutBuf[1] = (BYTE) (dwRelOffset & 0xFF);
-    lpOutBuf[2] = (BYTE) ((dwRelOffset >> 8) & 0xFF);
-    lpOutBuf[3] = (BYTE) ((dwRelOffset >> 16) & 0xFF);
-    lpOutBuf[4] = (BYTE) ((dwRelOffset >> 24) & 0xFF);
-    return 5;
-}
 
 typedef enum _GEAR_SHIFT {
     GEAR_REVERSE = 0,
@@ -96,8 +69,20 @@ typedef enum _GEAR_SHIFT {
     GEAR_FOURTH = 5,
     GEAR_FIFTH = 6,
     GEAR_SIXTH = 7,
-    GEAR_SEVENTH = 8
+    GEAR_SEVENTH = 8,
+    GEAR_NOCHANGE = 0xFFFFFFFF
 } GEAR_SHIFT, *PGEAR_SHIFT;
+
+GLOBAL HANDLE g_hShifterThread = NULL;
+GLOBAL MAYBE_UNUSED DWORD g_dwLastGear = 0;
+GLOBAL GetRawInputData_t oGetRawInputData = NULL;
+
+DWORD sub_404010 = MW_FUNC_SUB_404010;
+fn_ShiftGear ShiftGear = (fn_ShiftGear) MW_FUNC_SHIFTGEAR;
+
+DWORD CallShiftGear(
+    DWORD dwTargetGear
+);
 
 UINT WINAPI HookGetRawInputData(
     HRAWINPUT hRawInput,
@@ -121,22 +106,21 @@ UINT WINAPI HookGetRawInputData(
             USHORT vkCode = pRaw->data.keyboard.VKey;
 
             if ('N' == vkCode) {
-                *g_lpdwGearAddress = GEAR_NEUTRAL;
+                CallShiftGear(
+                    GEAR_NEUTRAL
+                );
             }
 
             if ('0' == vkCode) {
-                *g_lpdwGearAddress = GEAR_REVERSE;
-            }
-
-            if (VK_DELETE == vkCode) {
-                printf("[*] Resetting car object..\n");
-                g_dwCarObject = 0;
-                // regain object pointer, but wait loop here freezes the game
+                CallShiftGear(
+                    GEAR_REVERSE
+                );
             }
 
             if (vkCode >= '1' && vkCode <= '8') {
-                printf("[*] RawInput: %c pressed\n", vkCode);
-                *g_lpdwGearAddress = vkCode - 47;
+                CallShiftGear(
+                    vkCode - 47
+                );
             }
         }
     }
@@ -212,124 +196,133 @@ BOOLEAN InstallRawInputHook(
     return TRUE;
 }
 
+DWORD *__cdecl sub_5D49F0(DWORD *a1, int a2, int a3, DWORD *a4) 
+{
+    int v4; // esi
+    int v5; // ecx
+    int v6; // eax
+    DWORD *result; // eax
+
+    v4 = a2;
+    v5 = (a3 - a2) >> 3;
+    while (v5 > 0)
+    {
+        v6 = v5 / 2;
+        if (*(DWORD *) (v4 + 8 * (v5 / 2)) >= *a4)
+        {
+            v5 /= 2;
+        } else
+        {
+            v4 += 8 * v6 + 8;
+            v5 += -1 - v6;
+        }
+    }
+    result = a1;
+    *a1 = v4;
+    return result;
+}
+
+PDWORD sub_5D59F0(DWORD *thisptr, DWORD *a2)
+{
+    DWORD *v2; // esi
+    DWORD *v3; // edi
+    int v5; // [esp-10h] [ebp-20h]
+    DWORD v6[2]; // [esp+8h] [ebp-8h] BYREF
+
+    v2 = (DWORD *) thisptr[2];
+    v3 = a2;
+    v5 = thisptr[1];
+    v6[0] = (DWORD) a2;
+    v6[1] = 0;
+    sub_5D49F0(
+        (DWORD *) & a2,
+        v5, 
+        (DWORD) v2, 
+        v6
+    );
+    if (a2 == v2 || (DWORD *) *a2 != v3)
+        return 0;
+    else
+        return (PDWORD) a2[1];
+}
+
+DWORD *GetVehicleObject(
+    VOID
+) {
+    /*  call stack
+        -------------------------
+        * sub_6920D0  (ShiftGear)
+        * sub_6A0AA0
+        * sub_6AF440
+        *  * thisPointer = sub_5D59F0(registryObject, sub_404010)
+        * sub_69CE20 
+    */
+
+
+    /*
+        * sub_69CE20:
+            mov     eax, [ebp+7Ch]      ; pointer to registry container
+            test    eax, eax
+            jz      loc_69CED9
+            mov     ecx, [eax+4]        ; pointer to registry object (this)
+            push    offset sub_404010
+            call    sub_5D59F0
+    */
+
+    DWORD pdwRegistryContainer = *(PDWORD) MW_OBJ_REGISTRY_CONTAINER;
+    DWORD pdwThisRegistryObject = *(PDWORD) (pdwRegistryContainer + 4);
+
+    PDWORD pVehicle = sub_5D59F0(
+        (PDWORD) pdwThisRegistryObject,
+        (PDWORD) sub_404010
+    );
+
+    if (NULL == pVehicle) {
+        return NULL;
+    }
+
+    /*
+        * sub_6AF440 => [ return sub_6A0AA0(this - 19, gear, 0); ]:
+            push    0
+            push    eax
+            add     ecx, 0FFFFFFB4h ; -19
+            call    sub_6A0AA0
+            retn    4
+    */ 
+    return pVehicle - 19;
+}
+
+DWORD CallShiftGear(
+    DWORD dwTargetGear
+) {
+    DWORD *pVehicle = GetVehicleObject();
+    if (NULL == pVehicle) {
+        return GEAR_NOCHANGE;
+    }
+
+    DWORD dwResult;
+
+#ifdef __cplusplus
+    dwResult = ShiftGear(
+        pVehicle,
+        dwTargetGear
+    );
+#else
+    // simulate __thiscall
+    __asm __volatile {
+        push    dwTargetGear
+        mov     ecx, pVehicle
+        call    ShiftGear
+        mov     dwResult, eax
+    }
+#endif
+
+    return dwResult;
+}
 
 DWORD WINAPI ShifterThread(
     LPVOID lpParam
 ) {
-    AllocConsole();
-    freopen_s(&g_fpStdout, "CONOUT$", "w", stdout);
-    freopen_s(&g_fpStderr, "CONOUT$", "w", stderr);
-
-    if (NULL == g_fpStdout) {
-        return EXIT_FAILURE;
-    }
-
-
-    HMODULE hBaseModule = GetModuleHandle(NULL);
-
-    if (NULL == hBaseModule) {
-        return EXIT_FAILURE;
-    }
-
-    g_dwOriginalShiftGearFunction = (DWORD_PTR) hBaseModule + NFSMW_SHIFTGEAR_FUNCTION_OFFSET;
-
-    DWORD dwOldProtect = 0;
-    if (!VirtualProtect(
-        (LPVOID) g_dwOriginalShiftGearFunction,
-        sizeof(abyOriginalPrologue),
-        PAGE_EXECUTE_READWRITE,
-        &dwOldProtect
-    )) {
-        fprintf(
-            stderr,
-            "VirtualProtect(): E%lu\n",
-            GetLastError()
-        );
-        return EXIT_FAILURE;
-    }
-
-    BYTE abyJumpFromTrampolineToHook[5] = { 0 };
-    SIZE_T dwJumpSize = GenJump(
-        (DWORD32) _GearShiftHook,
-        (DWORD32) g_dwOriginalShiftGearFunction,
-        abyJumpFromTrampolineToHook
-    );
-
-    if (2 == dwJumpSize) {
-        memset(
-            &abyJumpFromTrampolineToHook[2],
-            0x90,
-            sizeof(abyJumpFromTrampolineToHook) - 2
-        );
-    }
-
-    memcpy(
-        (LPVOID) g_dwOriginalShiftGearFunction,
-        abyJumpFromTrampolineToHook,
-        sizeof(abyJumpFromTrampolineToHook)
-    );
-
-    VirtualProtect(
-        (LPVOID) g_dwOriginalShiftGearFunction,
-        sizeof(abyOriginalPrologue),
-        dwOldProtect,
-        &dwOldProtect
-    );
-
-    if (!VirtualProtect(
-        (LPVOID) _GearShiftHook,
-        sizeof(abyOriginalPrologue),    // whatever
-        PAGE_EXECUTE_READWRITE,
-        &dwOldProtect
-    )) {
-        fprintf(
-            stderr,
-            "VirtualProtect(): E%lu\n",
-            GetLastError()
-        );
-        return EXIT_FAILURE;
-    }
-
-    BYTE abyJumpFromHookToOriginal[5] = { 0 };
-    dwJumpSize = GenJump(
-        (DWORD32) g_dwOriginalShiftGearFunction + 9,
-        (DWORD32) _GearShiftHook + 15,
-        abyJumpFromHookToOriginal
-    );
-
-    if (2 == dwJumpSize) {
-        memset(
-            &abyJumpFromHookToOriginal[2],
-            0x90,
-            sizeof(abyJumpFromHookToOriginal) - 2
-        );
-    }
-
-    memcpy(
-        (LPVOID) ((DWORD32) _GearShiftHook + 15),
-        abyJumpFromHookToOriginal,
-        sizeof(abyJumpFromHookToOriginal)
-    );
-
-    VirtualProtect(
-        (LPVOID) _GearShiftHook,
-        sizeof(abyOriginalPrologue),    // whatever
-        dwOldProtect,
-        &dwOldProtect
-    );
-
-    while (0 == g_dwCarObject) {
-        Sleep(50); // wait for the car object to be set
-    }
-
-    g_lpdwGearAddress = (PDWORD) ((DWORD32) g_dwCarObject + 0x84);
-    printf(
-        "[*] Car object: %08X\n"
-        "[*] Gear address: %08X\n",
-        (DWORD_PTR) g_dwCarObject,
-        (DWORD_PTR) g_lpdwGearAddress
-    );
-
     if (!InstallRawInputHook()) {
         printf(
             "[-] Failed to install raw input hook\n"
@@ -359,7 +352,7 @@ BOOL APIENTRY DllMain(
             if (NULL == g_hShifterThread) {
                 MessageBoxA(
                     NULL, 
-                    "Failed to create shifter thread", 
+                    "Failed to initialize H-Shifter", 
                     "Error", 
                     MB_OK | MB_ICONERROR
                 );
